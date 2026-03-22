@@ -1,0 +1,68 @@
+import streamlit as st
+import pandas as pd
+import requests
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+
+# App Configuration
+st.set_page_config(page_title="Dungeness River Flow Predictor", layout="wide")
+st.title("🌊 Dungeness River Critical Flow Predictor")
+st.markdown("Monitoring real-time flow near Sequim, WA (USGS 12048000)")
+
+# 1. Fetch USGS Data
+@st.cache_data(ttl=3600)  # Refresh data every hour
+def get_river_data():
+    url = "https://waterservices.usgs.gov/nwis/iv/?format=json&sites=12048000&parameterCd=00060&period=P7D"
+    response = requests.get(url).json()
+    time_series = response['value']['timeSeries'][0]['values'][0]['value']
+    
+    df = pd.DataFrame(time_series)
+    df['dateTime'] = pd.to_datetime(df['dateTime'])
+    df['value'] = pd.to_numeric(df['value'])
+    return df[['dateTime', 'value']].rename(columns={'value': 'flow_cfs'})
+
+try:
+    data = get_river_data()
+    current_flow = data['flow_cfs'].iloc[-1]
+    
+    # 2. Sidebar Controls
+    st.sidebar.header("Forecast Settings")
+    baseflow_factor = st.sidebar.slider("Groundwater Recharge Rate (%)", 1, 10, 5) / 100
+    critical_threshold = st.sidebar.number_input("Critical Threshold (CFS)", value=120)
+
+    # 3. Display Metrics
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Current Flow", f"{current_flow} CFS")
+    col2.metric("7-Day Max", f"{data['flow_cfs'].max()} CFS")
+    col3.metric("Threshold", f"{critical_threshold} CFS")
+
+    # 4. Two-Phase Recession Logic
+    # Simple projection: Flow(t) = Flow(0) * e^(-kt)
+    # We'll use a simplified linear decay for the visual dashboard
+    days_to_forecast = 14
+    forecast_dates = [data['dateTime'].iloc[-1] + timedelta(days=i) for i in range(days_to_forecast)]
+    # Using a 0.92 decay constant typical for Dungeness summer recession
+    forecast_values = [current_flow * (0.92 ** i) for i in range(days_to_forecast)]
+    
+    forecast_df = pd.DataFrame({'dateTime': forecast_dates, 'flow_cfs': forecast_values})
+
+    # 5. Visualization
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(data['dateTime'], data['flow_cfs'], label="Actual Flow", color="blue", linewidth=2)
+    ax.plot(forecast_df['dateTime'], forecast_df['flow_cfs'], label="Recession Forecast", color="orange", linestyle="--")
+    ax.axhline(y=critical_threshold, color='red', linestyle='-', label="Critical Level")
+    
+    ax.set_ylabel("Flow (CFS)")
+    ax.legend()
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
+
+    # 6. Critical Alert
+    days_until_critical = next((i for i, v in enumerate(forecast_values) if v < critical_threshold), None)
+    if days_until_critical is not None:
+        st.warning(f"⚠️ Projections suggest river may hit {critical_threshold} CFS in approximately **{days_until_critical} days**.")
+    else:
+        st.success("✅ River is projected to remain above critical levels for the next 14 days.")
+
+except Exception as e:
+    st.error(f"Error fetching data: {e}")
